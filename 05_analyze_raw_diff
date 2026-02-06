@@ -1,0 +1,63 @@
+# -*- coding: utf-8 -*-
+"""
+[Step 5] Raw Data Analysis Tool
+Compare Healthy vs Damaged files directly to check data quality.
+"""
+import matplotlib.pyplot as plt
+import numpy as np
+
+# --- 설정 ---
+HEALTHY_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\healthy.txt"
+DAMAGE_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\D1_48_1.txt"
+
+def load_data_simple(path):
+    data = []
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    try: data.append(float(parts[1]))
+                    except: continue
+        return np.array(data)
+    except Exception as e:
+        print(f"Error: {e}")
+        return np.array([])
+
+def main():
+    h = load_data_simple(HEALTHY_PATH)
+    d = load_data_simple(DAMAGE_PATH)
+    
+    if len(h) == 0 or len(d) == 0:
+        print("Data load failed.")
+        return
+
+    # 50,000 points comparison
+    N = 50000
+    limit = min(N, len(h), len(d))
+    
+    h_seg = h[:limit]
+    d_seg = d[:limit]
+    diff = h_seg - d_seg
+
+    plt.figure(figsize=(15, 8))
+    plt.subplot(2, 1, 1)
+    plt.plot(h_seg, 'b-', label='Healthy', linewidth=0.5, alpha=0.8)
+    plt.plot(d_seg, 'r--', label='Damage', linewidth=0.5, alpha=0.8)
+    plt.title(f"Signal Comparison (First {limit} pts)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(2, 1, 2)
+    plt.plot(diff, 'k-', linewidth=0.5)
+    plt.title(f"Difference (H - D)\nMax Diff: {np.max(np.abs(diff)):.6f}")
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"Max Diff: {np.max(np.abs(diff)):.6f}")
+    print(f"L1 Norm: {np.sum(np.abs(diff)):.6f}")
+
+if __name__ == "__main__":
+    main()
