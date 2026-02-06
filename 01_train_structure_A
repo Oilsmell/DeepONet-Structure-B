@@ -1,0 +1,87 @@
+# -*- coding: utf-8 -*-
+"""
+[Step 1] Train DeepONet on Structure A
+Feature: Asymmetric Loss, DI in Branch Net
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import os
+from scipy.stats import kurtosis
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# --- 설정 ---
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\ds1"
+SAVE_MODEL_PATH = "deeponet_phase2_structure_A.pth"
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+WINDOW_SIZE = 128
+TRAIN_POINTS = 128000
+FS = 1000.0
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- 모델 정의 ---
+class FourierFeature(nn.Module):
+    def __init__(self, input_dim, mapping_size=256, scale=15):
+        super().__init__()
+        self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+    def forward(self, x):
+        projected = 2 * np.pi * (x @ self.B)
+        return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
+
+class DeepONetPhase2(nn.Module):
+    def __init__(self, branch_dim, trunk_dim, hidden_dim=256, output_dim=256):
+        super().__init__()
+        self.activation = nn.SiLU()
+        self.branch = nn.Sequential(
+            nn.Linear(branch_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.fourier_dim = 256
+        self.fourier = FourierFeature(trunk_dim, mapping_size=self.fourier_dim, scale=15.0)
+        self.trunk = nn.Sequential(
+            nn.Linear(self.fourier_dim * 2, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.bias = nn.Parameter(torch.zeros(1))
+    def forward(self, u, y):
+        B = self.branch(u)
+        y_embedded = self.fourier(y)
+        T = self.trunk(y_embedded)
+        B_expanded = B.unsqueeze(1)
+        return torch.sum(B_expanded * T, dim=-1) + self.bias
+
+# --- 비대칭 Loss ---
+def peak_weighted_mse_loss(pred, target):
+    base_loss = (pred - target) ** 2
+    weight = torch.where(target > 0, 3.0, 1.0) # 양수 피크에 3배 가중치
+    return torch.mean(weight * base_loss)
+
+# --- 데이터 로드 및 전처리 함수 (생략 없이 구현 필요 시 이전 대화 참조) ---
+# (이 부분은 Structure A 데이터를 로드하여 U, Y, G를 만드는 create_dataset_phase2 함수가 필요합니다.)
+# ... (create_dataset_phase2 로직 구현) ...
+
+def main():
+    print(f"🚀 Training Start on {device}")
+    # 데이터셋 생성 (메모리 문제 시 배치 처리 필요)
+    # (U_train, Y_train, G_train) 로드 로직
+    
+    # 모델 초기화
+    model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=0.001)
+    
+    # 학습 루프 (AdamW -> L-BFGS)
+    # ...
+    
+    torch.save(model.state_dict(), SAVE_MODEL_PATH)
+    print(f"Model saved to {SAVE_MODEL_PATH}")
+
+if __name__ == "__main__":
+    pass # 실제 실행 시에는 main() 호출
