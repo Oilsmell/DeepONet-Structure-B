@@ -1,0 +1,144 @@
+# -*- coding: utf-8 -*-
+"""
+[Step 3] Inference on Structure B (Generate Synthetic Damage)
+Feature: Robust Data Loading & Zero-shot Transfer
+"""
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import os
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# --- 설정 ---
+STRUCTURE_B_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\healthy.txt"
+MODEL_PATH = "deeponet_phase2_structure_A.pth"
+WINDOW_SIZE = 128
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- 모델 클래스 (동일) ---
+class FourierFeature(nn.Module):
+    def __init__(self, input_dim, mapping_size=256, scale=15):
+        super().__init__()
+        self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+    def forward(self, x):
+        projected = 2 * np.pi * (x @ self.B)
+        return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
+
+class DeepONetPhase2(nn.Module):
+    def __init__(self, branch_dim, trunk_dim, hidden_dim=256, output_dim=256):
+        super().__init__()
+        self.activation = nn.SiLU()
+        self.branch = nn.Sequential(
+            nn.Linear(branch_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.fourier_dim = 256
+        self.fourier = FourierFeature(trunk_dim, mapping_size=self.fourier_dim, scale=15.0)
+        self.trunk = nn.Sequential(
+            nn.Linear(self.fourier_dim * 2, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, hidden_dim), self.activation,
+            nn.Linear(hidden_dim, output_dim),
+        )
+        self.bias = nn.Parameter(torch.zeros(1))
+    def forward(self, u, y):
+        B = self.branch(u)
+        y_embedded = self.fourier(y)
+        T = self.trunk(y_embedded)
+        B_expanded = B.unsqueeze(1)
+        return torch.sum(B_expanded * T, dim=-1) + self.bias
+
+# --- 데이터 로더 ---
+def load_structure_b_robust(filepath):
+    print(f"\n[Data Load] Reading file: {filepath}")
+    if not os.path.exists(filepath): return None
+    y_data = []
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) != 2: continue
+                try: y_data.append(float(parts[1]))
+                except ValueError: continue
+        data = np.array(y_data, dtype=np.float32)
+        reshaped_data = data.reshape(8, 200000).T
+        print(f"   -> Loaded Shape: {reshaped_data.shape}")
+        return reshaped_data
+    except Exception as e:
+        print(f"   ❌ Error: {e}")
+        return None
+
+def preprocess_structure_b(raw_data, window_size=128):
+    n_points, n_sensors = raw_data.shape
+    n_samples = n_points // window_size
+    reshaped = raw_data[:n_samples*window_size, :].reshape(n_samples, window_size, n_sensors)
+    U_b = reshaped.reshape(n_samples, -1)
+    return U_b, n_samples
+
+def main():
+    print("[1] Loading Trained Model...")
+    model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
+    try:
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        print("   ✅ Model loaded.")
+    except Exception as e:
+        print(f"   ❌ Model load failed: {e}")
+        return
+    model.eval()
+
+    print("\n[2] Loading Structure B Data...")
+    raw_data_b = load_structure_b_robust(STRUCTURE_B_PATH)
+    if raw_data_b is None: return
+
+    print("\n[3] Preprocessing...")
+    U_b_raw, n_samples = preprocess_structure_b(raw_data_b, WINDOW_SIZE)
+    scaler = StandardScaler()
+    U_b_scaled = scaler.fit_transform(U_b_raw)
+
+    print("\n[4] Generating Damage Data (Target DI=2.0)...")
+    TARGET_DI = 2.0
+    di_col = np.full((n_samples, 1), TARGET_DI)
+    U_combined = np.hstack([U_b_scaled, di_col])
+
+    t_idx = np.arange(WINDOW_SIZE)
+    s_idx = np.arange(8)
+    t_mesh, s_mesh = np.meshgrid(t_idx, s_idx, indexing='ij')
+    y_grid = np.stack([t_mesh.flatten(), s_mesh.flatten()], axis=1)
+    
+    scaler_trunk = MinMaxScaler()
+    y_grid_scaled = scaler_trunk.fit_transform(y_grid)
+    y_batch_tensor = torch.FloatTensor(y_grid_scaled).unsqueeze(0).to(device)
+
+    batch_size = 100
+    generated_list = []
+    
+    with torch.no_grad():
+        for i in range(0, n_samples, batch_size):
+            u_batch = torch.FloatTensor(U_combined[i:i+batch_size]).to(device)
+            curr_bs = u_batch.shape[0]
+            y_batch = y_batch_tensor.repeat(curr_bs, 1, 1)
+            pred = model(u_batch, y_batch)
+            generated_list.append(pred.cpu().numpy())
+            
+    generated_data = np.concatenate(generated_list, axis=0)
+    print(f"   ✅ Generation Complete. Shape: {generated_data.shape}")
+
+    # 시각화
+    sample_idx = 0
+    healthy_sig = scaler.inverse_transform(U_b_scaled)[sample_idx]
+    damaged_sig_gen = scaler.inverse_transform(generated_data)[sample_idx]
+    
+    plt.figure(figsize=(12, 5))
+    plt.plot(healthy_sig[:128], 'b-', alpha=0.5, label='Healthy')
+    plt.plot(damaged_sig_gen[:128], 'r--', linewidth=2, label=f'Gen Damage (DI={TARGET_DI})')
+    plt.title(f"Structure B Generation Check")
+    plt.legend()
+    plt.savefig("structure_b_inference_result.png")
+    print("   Graph saved.")
+
+if __name__ == "__main__":
+    main()
