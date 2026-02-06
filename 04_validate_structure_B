@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+Created on Fri Feb  6 14:00:26 2026
+
+@author: Oilsmell
+"""
+
+# -*- coding: utf-8 -*-
+"""
 [Step 4] Validate Structure B (Real Damage vs Generated Damage)
 """
 import numpy as np
@@ -12,9 +19,9 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import mean_squared_error
 
 # --- 설정 ---
-HEALTHY_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\healthy.txt"
-DAMAGE_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\D1_48_1.txt" # 48% 손상 데이터
-MODEL_PATH = "deeponet_phase2_structure_A.pth"
+HEALTHY_PATH = r"E:\2ndstructuredata\raw data\healthyclean.txt"
+DAMAGE_PATH = r"E:\2ndstructuredata\raw data\D1_48_1.txt" # 48% 손상 데이터
+MODEL_PATH = r"E:\2ndstructuredata\Code\deeponet_phase2_structure_A.pth"
 WINDOW_SIZE = 128
 FS = 1000.0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
