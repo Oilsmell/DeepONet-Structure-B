@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+"""
+[Step 2] Verify Model on Structure A (Self-Check)
+"""
+import torch
+import matplotlib.pyplot as plt
+# (DeepONetPhase2 클래스 정의 필요 - 01번 파일에서 import 하거나 복사)
+
+def main():
+    # 모델 로드
+    model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
+    model.load_state_dict(torch.load("deeponet_phase2_structure_A.pth"))
+    model.eval()
+    
+    # Structure A 검증 데이터 로드 (DI가 포함된 U_val)
+    # ...
+    
+    # 추론 및 그래프 그리기
+    # plt.plot(Real); plt.plot(Generated)
+    pass
