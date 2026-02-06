@@ -1,32 +1,43 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Feb  6 14:12:46 2026
-
-@author: Oilsmell
+[Step 2] Verify Model on Structure A (Internal Validation)
+- Load the pre-trained model on Structure A.
+- Generate damage signals and compare them with the real Ground Truth signals.
+- Visualization of waveform matching performance.
 """
 
-# -*- coding: utf-8 -*-
-"""
-[Step 2] Verify Model on Structure A (Self-Check)
-Checks if the model can reproduce Structure A damage signals.
-"""
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 import matplotlib.pyplot as plt
 import os
+from scipy.stats import kurtosis
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import mean_squared_error
 
-# --- 설정 (경로 변경) ---
+# =========================================================
+# 0. 설정 (Configuration)
+# =========================================================
 DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\ds1"
 MODEL_PATH = r"E:\2ndstructuredata\Code\deeponet_phase2_structure_A.pth"
-SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# --- 모델 클래스 복사 ---
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+FS = 1000.0
+WINDOW_SIZE = 128
+TRAIN_POINTS = 128000
+VAL_POINTS = 64000
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🚀 Current Device: {device}")
+
+# =========================================================
+# 1. 모델 정의 (학습 시와 동일)
+# =========================================================
 class FourierFeature(nn.Module):
     def __init__(self, input_dim, mapping_size=256, scale=15):
         super().__init__()
         self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+
     def forward(self, x):
         projected = 2 * np.pi * (x @ self.B)
         return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
@@ -51,23 +62,135 @@ class DeepONetPhase2(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
         self.bias = nn.Parameter(torch.zeros(1))
+
     def forward(self, u, y):
         B = self.branch(u)
         y_embedded = self.fourier(y)
         T = self.trunk(y_embedded)
         B_expanded = B.unsqueeze(1)
-        return torch.sum(B_expanded * T, dim=-1) + self.bias
+        output = torch.sum(B_expanded * T, dim=-1)
+        return output + self.bias
 
+# =========================================================
+# 2. 유틸리티 함수
+# =========================================================
+def load_specific_nodes(filepath, target_indices):
+    try:
+        if not os.path.exists(filepath): return None
+        full_data = np.loadtxt(filepath)
+        return full_data[:, target_indices].astype(np.float32)
+    except: return None
+
+def calculate_kurtosis_feature(signal, fs, window_sec=2.0):
+    points = int(fs * window_sec)
+    n = len(signal) // points
+    if n == 0: return 0.0
+    k = kurtosis(signal[:n*points].reshape(n, points), axis=1, fisher=False)
+    return np.percentile(k, 95)
+
+def prepare_data_split(raw_data, start_idx, num_points, window_size):
+    data_slice = raw_data[start_idx : start_idx + num_points, :]
+    num_samples = num_points // window_size
+    flattened = data_slice.reshape(num_samples, window_size, -1).reshape(num_samples, -1)
+    return flattened, num_samples
+
+# =========================================================
+# 3. 메인 검증 프로세스
+# =========================================================
 def main():
-    print("[1] Loading Model...")
-    if not os.path.exists(MODEL_PATH):
-        print(f"❌ Model not found: {MODEL_PATH}")
-        return
+    # 1. 데이터 로드 및 전처리 (학습 데이터와 동일한 스케일러 구성을 위해 전체 로드)
+    print("[1] Loading Structure A Data for Scaler Reconstruction...")
+    h_file = os.path.join(DATA_PATH, "fh_accelerations.dat")
+    raw_h = load_specific_nodes(h_file, SELECTED_NODE_INDICES)
+    
+    raw_d_list = []
+    for i in range(1, 11):
+        d_file = os.path.join(DATA_PATH, f"f{i}_accelerations.dat")
+        raw_d_list.append(load_specific_nodes(d_file, SELECTED_NODE_INDICES))
+
+    # DI 계산
+    base_kurts = [calculate_kurtosis_feature(raw_h[:, s], FS) for s in range(8)]
+    c_values = []
+    for d_data in raw_d_list:
+        diffs = [abs(base_kurts[s] - calculate_kurtosis_feature(d_data[:, s], FS)) for s in range(8)]
+        c_values.append(np.mean(diffs))
+    c_values = np.array(c_values).reshape(-1, 1)
+
+    # Scaler 재구성을 위한 학습 데이터 준비 (01번 코드와 동일 로직)
+    u_train_raw, n_train_samples = prepare_data_split(raw_h, 0, TRAIN_POINTS, WINDOW_SIZE)
+    U_train_base = np.tile(u_train_raw, (10, 1))
+    di_train_list = [np.full((n_train_samples, 1), c_values[i, 0]) for i in range(10)]
+    U_train_combined = np.hstack([U_train_base, np.concatenate(di_train_list, axis=0)])
+    
+    g_train_parts = [prepare_data_split(d, 0, TRAIN_POINTS, WINDOW_SIZE)[0] for d in raw_d_list]
+    G_train_final = np.concatenate(g_train_parts, axis=0)
+
+    scaler_u, scaler_g, scaler_y = StandardScaler(), StandardScaler(), MinMaxScaler()
+    scaler_u.fit(U_train_combined)
+    scaler_g.fit(G_train_final)
+    
+    # 2. 검증용 데이터 준비 (Validation Set)
+    print("[2] Preparing Validation Samples...")
+    u_val_raw, n_val_samples = prepare_data_split(raw_h, TRAIN_POINTS, VAL_POINTS, WINDOW_SIZE)
+    
+    # 예시로 'Case 5' (중간 정도 손상) 시나리오 선택
+    CASE_IDX = 4 # index 4 is f5
+    target_di = c_values[CASE_IDX, 0]
+    
+    U_val_base = u_val_raw # (N_val, 1024)
+    DI_val_col = np.full((n_val_samples, 1), target_di)
+    U_val_combined = np.hstack([U_val_base, DI_val_col])
+    U_val_scaled = scaler_u.transform(U_val_combined)
+    
+    # 정답지 (Real Damaged Signal f5)
+    g_val_real, _ = prepare_data_split(raw_d_list[CASE_IDX], TRAIN_POINTS, VAL_POINTS, WINDOW_SIZE)
+    G_val_real_scaled = scaler_g.transform(g_val_real)
+
+    # Trunk Grid 준비
+    t_idx, s_idx = np.arange(WINDOW_SIZE), np.arange(8)
+    t_mesh, s_mesh = np.meshgrid(t_idx, s_idx, indexing='ij')
+    y_grid = np.stack([t_mesh.flatten(), s_mesh.flatten()], axis=1)
+    scaler_y.fit(y_grid) # Trunk는 고정 그리드이므로 여기서 fit
+    y_grid_scaled = scaler_y.transform(y_grid)
+
+    # 3. 모델 로드
+    print("[3] Loading Trained Model...")
     model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval()
-    print("   Model loaded successfully.")
-    print("   Please check training loss logs for primary verification.")
+
+    # 4. 추론 (Inference)
+    print("[4] Generating Damaged Signal...")
+    sample_idx = 0 # 검증 세트의 첫 번째 윈도우 샘플 선택
+    u_input = torch.FloatTensor(U_val_scaled[sample_idx:sample_idx+1]).to(device)
+    y_input = torch.FloatTensor(y_grid_scaled).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        pred_scaled = model(u_input, y_input).cpu().numpy().reshape(1, -1)
+    
+    # 역정규화 (Physical Unit 복원)
+    pred_phys = scaler_g.inverse_transform(pred_scaled).reshape(WINDOW_SIZE, 8)
+    real_phys = g_val_real[sample_idx].reshape(WINDOW_SIZE, 8)
+    healthy_phys = u_val_raw[sample_idx].reshape(WINDOW_SIZE, 8)
+
+    # 5. 시각화 (Visualization)
+    print("[5] Visualizing Internal Validation Results...")
+    sensor_to_plot = 0 # 1번 센서(Index 0) 출력
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(healthy_phys[:, sensor_to_plot], 'g:', alpha=0.5, label='Healthy Input (Structure A)')
+    plt.plot(real_phys[:, sensor_to_plot], 'b-', linewidth=1.5, label=f'Real Damage (f{CASE_IDX+1}, DI={target_di:.4f})')
+    plt.plot(pred_phys[:, sensor_to_plot], 'r--', linewidth=2, label='Generated Damage (DeepONet)')
+    
+    plt.title(f"Structure A Internal Validation: Real vs Predicted\nMSE: {mean_squared_error(real_phys, pred_phys):.6f}")
+    plt.xlabel("Time Step (Window)")
+    plt.ylabel("Acceleration (m/s²)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    print("✅ Internal validation complete. Waveform comparison displayed.")
 
 if __name__ == "__main__":
     main()
