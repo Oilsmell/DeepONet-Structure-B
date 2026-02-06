@@ -11,8 +11,8 @@ import os
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # --- 설정 ---
-STRUCTURE_B_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\healthy.txt"
-MODEL_PATH = "deeponet_phase2_structure_A.pth"
+STRUCTURE_B_PATH = r"E:\2ndstructuredata\raw data\healthyclean.txt"
+MODEL_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\deeponet_phase2_structure_A.pth"
 WINDOW_SIZE = 128
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
