@@ -5,6 +5,7 @@ Feature: Asymmetric Loss, DI in Branch Net
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,20 +14,34 @@ import os
 from scipy.stats import kurtosis
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-# --- 설정 ---
+# =========================================================
+# 0. 설정 (Configuration)
+# =========================================================
 DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\ds1"
 SAVE_MODEL_PATH = "deeponet_phase2_structure_A.pth"
+
 SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+FS = 1000.0
 WINDOW_SIZE = 128
 TRAIN_POINTS = 128000
-FS = 1000.0
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+VAL_POINTS = 64000
 
-# --- 모델 정의 ---
+BATCH_SIZE = 1024
+LEARNING_RATE = 0.001
+EPOCHS_ADAM = 200
+EPOCHS_LBFGS = 50
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🚀 Current Device: {device}")
+
+# =========================================================
+# 1. 모델 정의
+# =========================================================
 class FourierFeature(nn.Module):
     def __init__(self, input_dim, mapping_size=256, scale=15):
         super().__init__()
         self.register_buffer('B', torch.randn(input_dim, mapping_size) * scale)
+
     def forward(self, x):
         projected = 2 * np.pi * (x @ self.B)
         return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
@@ -35,14 +50,19 @@ class DeepONetPhase2(nn.Module):
     def __init__(self, branch_dim, trunk_dim, hidden_dim=256, output_dim=256):
         super().__init__()
         self.activation = nn.SiLU()
+        
+        # Branch: 1025 (Signal + DI)
         self.branch = nn.Sequential(
             nn.Linear(branch_dim, hidden_dim), self.activation,
             nn.Linear(hidden_dim, hidden_dim), self.activation,
             nn.Linear(hidden_dim, hidden_dim), self.activation,
             nn.Linear(hidden_dim, output_dim),
         )
+        
         self.fourier_dim = 256
         self.fourier = FourierFeature(trunk_dim, mapping_size=self.fourier_dim, scale=15.0)
+        
+        # Trunk: 2 (Time, Sensor)
         self.trunk = nn.Sequential(
             nn.Linear(self.fourier_dim * 2, hidden_dim), self.activation,
             nn.Linear(hidden_dim, hidden_dim), self.activation,
@@ -51,37 +71,203 @@ class DeepONetPhase2(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
         self.bias = nn.Parameter(torch.zeros(1))
+
     def forward(self, u, y):
         B = self.branch(u)
         y_embedded = self.fourier(y)
         T = self.trunk(y_embedded)
         B_expanded = B.unsqueeze(1)
-        return torch.sum(B_expanded * T, dim=-1) + self.bias
+        output = torch.sum(B_expanded * T, dim=-1)
+        return output + self.bias
 
-# --- 비대칭 Loss ---
+# =========================================================
+# 2. 비대칭 Loss 함수
+# =========================================================
 def peak_weighted_mse_loss(pred, target):
     base_loss = (pred - target) ** 2
     weight = torch.where(target > 0, 3.0, 1.0) # 양수 피크에 3배 가중치
     return torch.mean(weight * base_loss)
 
-# --- 데이터 로드 및 전처리 함수 (생략 없이 구현 필요 시 이전 대화 참조) ---
-# (이 부분은 Structure A 데이터를 로드하여 U, Y, G를 만드는 create_dataset_phase2 함수가 필요합니다.)
-# ... (create_dataset_phase2 로직 구현) ...
+# =========================================================
+# 3. 데이터 로드 및 전처리
+# =========================================================
+def load_specific_nodes(filepath, target_indices):
+    try:
+        if not os.path.exists(filepath):
+            return np.random.randn(192001, len(target_indices)).astype(np.float32)
+        full_data = np.loadtxt(filepath)
+        return full_data[:, target_indices].astype(np.float32)
+    except Exception:
+        return None
 
+def calculate_kurtosis_feature(signal, fs, window_sec=2.0):
+    points = int(fs * window_sec)
+    n = len(signal) // points
+    if n == 0: return 0.0
+    windows = signal[:n*points].reshape(n, points)
+    k = kurtosis(windows, axis=1, fisher=False)
+    return np.percentile(k, 95)
+
+def prepare_data_split(raw_data, start_idx, num_points, window_size):
+    data_slice = raw_data[start_idx : start_idx + num_points, :]
+    num_samples = num_points // window_size
+    flattened = data_slice.reshape(num_samples, window_size, -1).reshape(num_samples, -1)
+    return flattened, num_samples
+
+def create_dataset_phase2():
+    print("[1] Data Loading & Processing...")
+    h_file = os.path.join(DATA_PATH, "fh_accelerations.dat")
+    raw_h = load_specific_nodes(h_file, SELECTED_NODE_INDICES)
+    
+    raw_d_list = []
+    for i in range(1, 11):
+        d_file = os.path.join(DATA_PATH, f"f{i}_accelerations.dat")
+        data = load_specific_nodes(d_file, SELECTED_NODE_INDICES)
+        if data is None: data = np.random.randn(192001, 8).astype(np.float32)
+        raw_d_list.append(data)
+
+    # Calculate DI (Kurtosis)
+    base_kurts = [calculate_kurtosis_feature(raw_h[:, s], FS) for s in range(8)]
+    c_values = []
+    for d_data in raw_d_list:
+        diffs = [abs(base_kurts[s] - calculate_kurtosis_feature(d_data[:, s], FS)) for s in range(8)]
+        c_values.append(np.mean(diffs))
+    c_values = np.array(c_values).reshape(-1, 1)
+
+    def make_set(is_train):
+        start = 0 if is_train else TRAIN_POINTS
+        points = TRAIN_POINTS if is_train else VAL_POINTS
+        
+        # 1. Healthy Signal (u)
+        u_part, n_samples = prepare_data_split(raw_h, start, points, WINDOW_SIZE)
+        U_base = np.tile(u_part, (10, 1)) # (N, 1024)
+        
+        # 2. Damaged Signal (G - Output)
+        g_parts = []
+        for d_data in raw_d_list:
+            g, _ = prepare_data_split(d_data, start, points, WINDOW_SIZE)
+            g_parts.append(g)
+        G_final = np.concatenate(g_parts, axis=0) # (N, 1024)
+        
+        # 3. Trunk Grid (y) - [Time, Sensor]
+        t_idx = np.arange(WINDOW_SIZE)
+        s_idx = np.arange(8)
+        t_mesh, s_mesh = np.meshgrid(t_idx, s_idx, indexing='ij')
+        t_flat = t_mesh.flatten()
+        s_flat = s_mesh.flatten()
+        
+        y_grid = np.stack([t_flat, s_flat], axis=1) 
+        Y_final = np.tile(y_grid, (n_samples * 10, 1, 1)) 
+        
+        # 4. Branch Input = Healthy + DI
+        di_list = []
+        for i in range(10):
+            di_val = c_values[i, 0]
+            di_col = np.full((n_samples, 1), di_val)
+            di_list.append(di_col)
+        DI_final = np.concatenate(di_list, axis=0)
+        
+        U_combined = np.hstack([U_base, DI_final])
+        return U_combined, Y_final, G_final
+
+    U_train, Y_train, G_train = make_set(is_train=True)
+    U_val, Y_val, G_val = make_set(is_train=False)
+    
+    # Normalization
+    scaler_u = StandardScaler()
+    U_train = scaler_u.fit_transform(U_train)
+    U_val = scaler_u.transform(U_val)
+    
+    scaler_g = StandardScaler()
+    G_train = scaler_g.fit_transform(G_train)
+    G_val = scaler_g.transform(G_val)
+    
+    scaler_y = MinMaxScaler()
+    Y_train_flat = Y_train.reshape(-1, 2)
+    scaler_y.fit(Y_train_flat)
+    
+    def scale_y(y):
+        s = y.shape
+        f = y.reshape(-1, 2)
+        sc = scaler_y.transform(f)
+        return sc.reshape(s)
+        
+    Y_train = scale_y(Y_train)
+    Y_val = scale_y(Y_val)
+    
+    return (U_train, Y_train, G_train), (U_val, Y_val, G_val)
+
+# =========================================================
+# 4. 메인 실행
+# =========================================================
 def main():
-    print(f"🚀 Training Start on {device}")
-    # 데이터셋 생성 (메모리 문제 시 배치 처리 필요)
-    # (U_train, Y_train, G_train) 로드 로직
+    # 1. Load Data
+    (U_train, Y_train, G_train), (U_val, Y_val, G_val) = create_dataset_phase2()
     
-    # 모델 초기화
+    train_ds = TensorDataset(torch.FloatTensor(U_train), torch.FloatTensor(Y_train), torch.FloatTensor(G_train))
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    
+    # 2. Model Setup
     model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=0.001)
     
-    # 학습 루프 (AdamW -> L-BFGS)
-    # ...
+    optimizer_adam = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_adam, T_max=EPOCHS_ADAM)
+    scaler = torch.amp.GradScaler('cuda') 
+
+    print(f"\n[Phase 2 Start] Training New Architecture on Structure A...")
+    print(f"   Goal: Validation Loss < 0.001")
     
+    # --- Stage 1: AdamW ---
+    print(f"   >>> Stage 1: AdamW ({EPOCHS_ADAM} epochs)")
+    for epoch in range(EPOCHS_ADAM):
+        model.train()
+        total_loss = 0
+        for bu, by, bg in train_loader:
+            bu, by, bg = bu.to(device), by.to(device), bg.to(device)
+            optimizer_adam.zero_grad()
+            
+            with torch.amp.autocast('cuda'):
+                pred = model(bu, by)
+                loss = peak_weighted_mse_loss(pred, bg)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_adam)
+            scaler.update()
+            total_loss += loss.item()
+            
+        scheduler.step()
+        if (epoch+1) % 20 == 0:
+            avg_loss = total_loss / len(train_loader)
+            print(f"   Epoch {epoch+1}: Loss {avg_loss:.6f}")
+
+    # --- Stage 2: L-BFGS ---
+    print(f"   >>> Stage 2: L-BFGS ({EPOCHS_LBFGS} epochs)")
+    torch.cuda.empty_cache()
+    
+    subset_size = 1000
+    perm = np.random.choice(len(U_train), subset_size, replace=False)
+    
+    lbfgs_u = torch.FloatTensor(U_train[perm]).to(device)
+    lbfgs_y = torch.FloatTensor(Y_train[perm]).to(device)
+    lbfgs_g = torch.FloatTensor(G_train[perm]).to(device)
+    
+    optimizer_lbfgs = optim.LBFGS(model.parameters(), lr=1.0, max_iter=20, history_size=10, line_search_fn="strong_wolfe")
+    
+    def closure():
+        optimizer_lbfgs.zero_grad()
+        pred = model(lbfgs_u, lbfgs_y)
+        loss = peak_weighted_mse_loss(pred, lbfgs_g)
+        loss.backward()
+        return loss
+
+    for epoch in range(EPOCHS_LBFGS):
+        loss = optimizer_lbfgs.step(closure)
+        if (epoch+1) % 10 == 0:
+            print(f"   L-BFGS Epoch {epoch+1}: Loss {loss.item():.7f}")
+
+    # Save Model
     torch.save(model.state_dict(), SAVE_MODEL_PATH)
-    print(f"Model saved to {SAVE_MODEL_PATH}")
+    print(f"   Model saved: {SAVE_MODEL_PATH}")
 
 if __name__ == "__main__":
-    pass # 실제 실행 시에는 main() 호출
+    main()
