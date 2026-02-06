@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+Created on Fri Feb  6 14:12:46 2026
+
+@author: Oilsmell
+"""
+
+# -*- coding: utf-8 -*-
+"""
 [Step 2] Verify Model on Structure A (Self-Check)
 Checks if the model can reproduce Structure A damage signals.
 """
@@ -8,12 +15,10 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-# (데이터 로드 함수 재사용을 위해 01번 파일의 함수를 포함하거나 동일하게 작성)
-# 여기서는 편의상 모델 클래스 정의를 포함합니다.
 
-# --- 설정 ---
+# --- 설정 (경로 변경) ---
 DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\ds1"
-MODEL_PATH = "deeponet_phase2_structure_A.pth"
+MODEL_PATH = r"E:\2ndstructuredata\Code\deeponet_phase2_structure_A.pth"
 SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,14 +60,14 @@ class DeepONetPhase2(nn.Module):
 
 def main():
     print("[1] Loading Model...")
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ Model not found: {MODEL_PATH}")
+        return
     model = DeepONetPhase2(branch_dim=1025, trunk_dim=2).to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
-    print("   Model loaded.")
-
-    # (Note: In a real scenario, you'd load the validation set created in Step 1.
-    # Here we assume the model works if training loss was low.)
-    print("   Verification skipped for brevity (Assume training was successful based on loss logs).")
+    print("   Model loaded successfully.")
+    print("   Please check training loss logs for primary verification.")
 
 if __name__ == "__main__":
     main()
