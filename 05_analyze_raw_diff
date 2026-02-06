@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """
+Created on Fri Feb  6 14:15:26 2026
+
+@author: Oilsmell
+"""
+
+# -*- coding: utf-8 -*-
+"""
 [Step 5] Raw Data Analysis Tool
 Compare Healthy vs Damaged files directly to check data quality.
 """
 import matplotlib.pyplot as plt
 import numpy as np
 
-# --- 설정 ---
-HEALTHY_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\healthy.txt"
-DAMAGE_PATH = r"E:\Benchmark Code\benchmarktu1402-master\2nd_structure\D1_48_1.txt"
+# --- 설정 (경로 변경) ---
+HEALTHY_PATH = r"E:\2ndstructuredata\raw data\healthyclean.txt"
+DAMAGE_PATH = r"E:\2ndstructuredata\raw data\D1_48_1.txt" # 48% 손상 데이터
 
 def load_data_simple(path):
     data = []
